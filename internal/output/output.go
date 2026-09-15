@@ -16,10 +16,14 @@ import (
 type Format string
 
 const (
-	JSON   Format = "json"
+	// JSON is indented JSON, the default.
+	JSON Format = "json"
+	// NDJSON is one compact JSON value per line, suited to streaming.
 	NDJSON Format = "ndjson"
-	Table  Format = "table"
-	CSV    Format = "csv"
+	// Table is aligned columns for humans.
+	Table Format = "table"
+	// CSV is comma-separated values with a single header row.
+	CSV Format = "csv"
 )
 
 // Parse validates a format name.
@@ -191,20 +195,20 @@ func (w *Writer) writeTable(payload any) error {
 	if !w.wroteHeader {
 		w.tableColumns = columnsOf(rows, 6)
 		w.wroteHeader = true
-		fmt.Fprintln(w.Out, strings.Join(w.tableColumns, "\t"))
+		_, _ = fmt.Fprintln(w.Out, strings.Join(w.tableColumns, "\t"))
 	}
 	tab := tabwriter.NewWriter(w.Out, 0, 4, 2, ' ', 0)
 	for _, row := range rows {
 		object, ok := row.(map[string]any)
 		if !ok {
-			fmt.Fprintln(tab, cell(row))
+			_, _ = fmt.Fprintln(tab, cell(row))
 			continue
 		}
 		cells := make([]string, 0, len(w.tableColumns))
 		for _, column := range w.tableColumns {
 			cells = append(cells, cell(object[column]))
 		}
-		fmt.Fprintln(tab, strings.Join(cells, "\t"))
+		_, _ = fmt.Fprintln(tab, strings.Join(cells, "\t"))
 	}
 	return tab.Flush()
 }

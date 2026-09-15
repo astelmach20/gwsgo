@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -125,11 +126,11 @@ func (c *Client) uploadMultipart(ctx context.Context, req Request, path, mediaTy
 	headers := map[string]string{
 		"Content-Type": "multipart/related; boundary=" + writer.Boundary(),
 	}
-	resp, raw, err := c.send(ctx, req.Method.HTTPMethod, endpoint, buffer.Bytes(), headers)
+	resp, err := c.send(ctx, req.Method.HTTPMethod, endpoint, buffer.Bytes(), headers)
 	if err != nil {
 		return nil, err
 	}
-	return decode(resp, raw)
+	return decode(resp)
 }
 
 // uploadResumable performs the chunked resumable upload protocol.
@@ -159,14 +160,14 @@ func (c *Client) uploadResumable(ctx context.Context, req Request, path, mediaTy
 		"X-Upload-Content-Type":   mediaType,
 		"X-Upload-Content-Length": strconv.FormatInt(size, 10),
 	}
-	resp, raw, err := c.send(ctx, req.Method.HTTPMethod, endpoint, encodedMetadata, initHeaders)
+	resp, err := c.send(ctx, req.Method.HTTPMethod, endpoint, encodedMetadata, initHeaders)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decode(resp, raw)
+	if resp.status < 200 || resp.status >= 300 {
+		return decode(resp)
 	}
-	session := resp.Header.Get("Location")
+	session := resp.header.Get("Location")
 	if session == "" {
 		return nil, fmt.Errorf("resumable upload was not given a session URI")
 	}
@@ -175,7 +176,7 @@ func (c *Client) uploadResumable(ctx context.Context, req Request, path, mediaTy
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	token, err := c.Tokens.AccessToken(ctx)
 	if err != nil {
@@ -186,16 +187,16 @@ func (c *Client) uploadResumable(ctx context.Context, req Request, path, mediaTy
 	var offset int64
 	for offset < size {
 		read, err := file.ReadAt(buffer, offset)
-		if err != nil && err != io.EOF {
+		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, err
 		}
 		if read == 0 {
 			break
 		}
-		chunk := buffer[:read]
+		payload := buffer[:read]
 		last := offset + int64(read) - 1
 
-		chunkReq, err := http.NewRequestWithContext(ctx, http.MethodPut, session, bytes.NewReader(chunk))
+		chunkReq, err := http.NewRequestWithContext(ctx, http.MethodPut, session, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
@@ -209,14 +210,17 @@ func (c *Client) uploadResumable(ctx context.Context, req Request, path, mediaTy
 			return nil, err
 		}
 		chunkBody, readErr := io.ReadAll(chunkResp.Body)
-		chunkResp.Body.Close()
+		if closeErr := chunkResp.Body.Close(); closeErr != nil && readErr == nil {
+			readErr = closeErr
+		}
 		if readErr != nil {
 			return nil, readErr
 		}
+		chunk := &response{status: chunkResp.StatusCode, header: chunkResp.Header.Clone(), body: chunkBody}
 
-		switch {
-		case chunkResp.StatusCode == 308:
-			next, err := resumeOffset(chunkResp.Header.Get("Range"))
+		switch chunk.status {
+		case 308:
+			next, err := resumeOffset(chunk.header.Get("Range"))
 			if err != nil {
 				return nil, err
 			}
@@ -224,10 +228,8 @@ func (c *Client) uploadResumable(ctx context.Context, req Request, path, mediaTy
 				return nil, fmt.Errorf("resumable upload made no progress at offset %d", offset)
 			}
 			offset = next
-		case chunkResp.StatusCode >= 200 && chunkResp.StatusCode < 300:
-			return decode(chunkResp, chunkBody)
 		default:
-			return decode(chunkResp, chunkBody)
+			return decode(chunk)
 		}
 	}
 	return nil, fmt.Errorf("resumable upload ended without a final response")
@@ -288,23 +290,23 @@ func (c *Client) Download(ctx context.Context, req Request, destination string) 
 	if err != nil {
 		return 0, err
 	}
-	resp, raw, err := c.send(ctx, http.MethodGet, endpoint, nil, nil)
+	resp, err := c.send(ctx, http.MethodGet, endpoint, nil, nil)
 	if err != nil {
 		return 0, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, decodeErr := decode(resp, raw)
+	if resp.status < 200 || resp.status >= 300 {
+		_, decodeErr := decode(resp)
 		return 0, annotateDownloadError(decodeErr)
 	}
-	if err := os.WriteFile(destination, raw, 0o600); err != nil {
+	if err := os.WriteFile(destination, resp.body, 0o600); err != nil {
 		return 0, err
 	}
-	if strings.HasSuffix(req.Method.ID, ".export") && int64(len(raw)) >= exportCeiling {
+	if strings.HasSuffix(req.Method.ID, ".export") && int64(len(resp.body)) >= exportCeiling {
 		fmt.Fprintf(os.Stderr,
 			"warning: export hit the %d byte server-side cap; use files.download for larger files\n",
 			exportCeiling)
 	}
-	return int64(len(raw)), nil
+	return int64(len(resp.body)), nil
 }
 
 // annotateDownloadError explains Drive's two most confusing download failures.

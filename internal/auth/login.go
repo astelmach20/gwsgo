@@ -76,12 +76,12 @@ func (m *Manager) Login(ctx context.Context, messages io.Writer) (Tokens, error)
 	if err != nil {
 		return Tokens{}, fmt.Errorf("could not open a loopback listener: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port)
 
 	results := make(chan callbackResult, 1)
 	server := &http.Server{
-		Handler:           http.HandlerFunc(m.callbackHandler(state, results)),
+		Handler:           m.callbackHandler(state, results),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() { _ = server.Serve(listener) }()
@@ -92,11 +92,11 @@ func (m *Manager) Login(ctx context.Context, messages io.Writer) (Tokens, error)
 	}()
 
 	authURL := m.authCodeURL(redirectURI, state, verifier.challenge)
-	fmt.Fprintf(messages, "Open this URL to authorize gwsg:\n\n%s\n\n", authURL)
+	_, _ = fmt.Fprintf(messages, "Open this URL to authorize gwsg:\n\n%s\n\n", authURL)
 	if err := openBrowser(authURL); err != nil {
-		fmt.Fprintf(messages, "(could not open a browser automatically: %v)\n", err)
+		_, _ = fmt.Fprintf(messages, "(could not open a browser automatically: %v)\n", err)
 	}
-	fmt.Fprintln(messages, "Waiting for the redirect...")
+	_, _ = fmt.Fprintln(messages, "Waiting for the redirect...")
 
 	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
@@ -118,7 +118,7 @@ func (m *Manager) Login(ctx context.Context, messages io.Writer) (Tokens, error)
 	if err := m.Save(tokens); err != nil {
 		return Tokens{}, err
 	}
-	fmt.Fprintf(messages, "Authorized. Credential cached at %s\n", m.CachePath)
+	_, _ = fmt.Fprintf(messages, "Authorized. Credential cached at %s\n", m.CachePath)
 	return tokens, nil
 }
 
@@ -191,7 +191,7 @@ func (m *Manager) exchange(ctx context.Context, code, redirectURI, verifier stri
 		return Tokens{}, err
 	}
 	if tokens.RefreshToken == "" {
-		return Tokens{}, errors.New("Google returned no refresh token; re-run with a fresh consent prompt")
+		return Tokens{}, errors.New("no refresh token was returned; re-run to force a fresh consent prompt")
 	}
 	tokens.SavedAt = m.Now().Unix()
 	return tokens, nil

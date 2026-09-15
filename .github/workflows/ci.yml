@@ -20,6 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        # Windows runners default to PowerShell, which mangles flags like
+        # -coverprofile=coverage.out into a stray ".out" package argument.
+        shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0

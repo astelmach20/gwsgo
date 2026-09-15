@@ -181,11 +181,20 @@ func (c *Client) backoff(header string, attempt int) time.Duration {
 	return time.Duration(rand.Int63n(int64(ceiling) + 1))
 }
 
+// response is a fully-read HTTP response. Returning this instead of an
+// *http.Response keeps body lifetime entirely inside send, so no caller can
+// leak a connection.
+type response struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
 // send performs one authenticated HTTP call with retries.
-func (c *Client) send(ctx context.Context, method, endpoint string, body []byte, headers map[string]string) (*http.Response, []byte, error) {
+func (c *Client) send(ctx context.Context, method, endpoint string, body []byte, headers map[string]string) (*response, error) {
 	token, err := c.Tokens.AccessToken(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for attempt := 0; ; attempt++ {
 		var reader io.Reader
@@ -194,7 +203,7 @@ func (c *Client) send(ctx context.Context, method, endpoint string, body []byte,
 		}
 		req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/json")
@@ -212,47 +221,50 @@ func (c *Client) send(ctx context.Context, method, endpoint string, body []byte,
 		if err != nil {
 			if attempt < c.Retries {
 				if sleepErr := c.Sleep(ctx, c.backoff("", attempt)); sleepErr != nil {
-					return nil, nil, sleepErr
+					return nil, sleepErr
 				}
 				continue
 			}
-			return nil, nil, err
+			return nil, err
 		}
 		raw, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
-			return nil, nil, readErr
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
 		}
 		if retryable(resp.StatusCode) && attempt < c.Retries {
 			if sleepErr := c.Sleep(ctx, c.backoff(resp.Header.Get("Retry-After"), attempt)); sleepErr != nil {
-				return nil, nil, sleepErr
+				return nil, sleepErr
 			}
 			continue
 		}
-		return resp, raw, nil
+		return &response{status: resp.StatusCode, header: resp.Header.Clone(), body: raw}, nil
 	}
 }
 
 // decode turns a response body into JSON, bytes, or an *Error.
-func decode(resp *http.Response, raw []byte) (any, error) {
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+func decode(resp *response) (any, error) {
+	if resp.status < 200 || resp.status >= 300 {
 		var payload any
-		if json.Unmarshal(raw, &payload) != nil {
-			payload = strings.TrimSpace(string(raw))
+		if json.Unmarshal(resp.body, &payload) != nil {
+			payload = strings.TrimSpace(string(resp.body))
 		}
-		return nil, &Error{Status: resp.StatusCode, Payload: payload}
+		return nil, &Error{Status: resp.status, Payload: payload}
 	}
-	if len(raw) == 0 {
+	if len(resp.body) == 0 {
 		return nil, nil
 	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
+	if strings.Contains(resp.header.Get("Content-Type"), "json") {
 		var payload any
-		if err := json.Unmarshal(raw, &payload); err != nil {
+		if err := json.Unmarshal(resp.body, &payload); err != nil {
 			return nil, err
 		}
 		return payload, nil
 	}
-	return raw, nil
+	return resp.body, nil
 }
 
 // Do executes a single Discovery-described method.
@@ -273,11 +285,11 @@ func (c *Client) Do(ctx context.Context, req Request) (any, error) {
 	if verb == "" {
 		verb = http.MethodGet
 	}
-	resp, raw, err := c.send(ctx, verb, endpoint, body, headers)
+	resp, err := c.send(ctx, verb, endpoint, body, headers)
 	if err != nil {
 		return nil, err
 	}
-	return decode(resp, raw)
+	return decode(resp)
 }
 
 // pageTokenFields are the response keys Google uses to signal another page.

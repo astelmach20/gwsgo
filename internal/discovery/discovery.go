@@ -203,7 +203,7 @@ func (c *Client) fetch(ctx context.Context, target string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -383,7 +383,7 @@ func (c *Client) Load(ctx context.Context, service Service) (*Document, error) {
 			continue
 		}
 		if doc.RootURL == "" {
-			lastErr = fmt.Errorf("Discovery document for %s/%s has no rootUrl", service.API, service.Version)
+			lastErr = fmt.Errorf("discovery document for %s/%s has no rootUrl", service.API, service.Version)
 			continue
 		}
 		c.store(cacheName, raw)
