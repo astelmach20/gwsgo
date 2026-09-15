@@ -1,0 +1,6 @@
+/dist/
+/gwsg
+/gwsg.exe
+*.test
+*.out
+.env
